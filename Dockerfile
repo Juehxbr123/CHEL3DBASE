@@ -1,31 +1,18 @@
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y \
-    gcc \
-    default-libmysqlclient-dev \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN useradd -m -u 1000 botuser
-
 WORKDIR /app
 
-COPY requirements.txt .
-COPY schema.sql .
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install cryptography pymysql
 
 COPY . .
+RUN chmod +x /app/docker-entrypoint.sh
 
-RUN touch .env php_config.php
-
-RUN chown -R botuser:botuser /app
-
-USER botuser
-
-COPY --chown=botuser:botuser docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-
-ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["python", "bot.py"]
+CMD ["/app/docker-entrypoint.sh"]
