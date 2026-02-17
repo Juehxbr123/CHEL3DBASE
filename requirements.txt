@@ -1,0 +1,6 @@
+aiogram==3.10.0
+pymysql
+python-dotenv
+streamlit
+pandas
+cryptography
