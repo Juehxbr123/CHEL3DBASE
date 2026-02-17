@@ -1,17 +1,19 @@
-# Author: Sergey Akulov
-# GitHub: https://github.com/serg-akulov
-
 import os
+from dataclasses import dataclass
+
 from dotenv import load_dotenv
 
-# Загружаем переменные из .env файла
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DB_HOST = os.getenv("DB_HOST")
-DB_USER = os.getenv("DB_USER")
-DB_PASS = os.getenv("DB_PASS")
-DB_NAME = os.getenv("DB_NAME")
 
-ADMIN_PANEL_PASSWORD = os.getenv("ADMIN_PANEL_PASSWORD")
-BOT_ADMIN_PASSWORD = os.getenv("BOT_ADMIN_PASSWORD")
+@dataclass(frozen=True)
+class Settings:
+    bot_token: str = os.getenv("BOT_TOKEN", "")
+    mysql_host: str = os.getenv("MYSQL_HOST", "mysql")
+    mysql_port: int = int(os.getenv("MYSQL_PORT", "3306"))
+    mysql_db: str = os.getenv("MYSQL_DB", "chel3d_db")
+    mysql_user: str = os.getenv("MYSQL_USER", "chel3d_user")
+    mysql_password: str = os.getenv("MYSQL_PASSWORD", "")
+
+
+settings = Settings()
