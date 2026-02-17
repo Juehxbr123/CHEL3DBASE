@@ -38,7 +38,7 @@ class Form(StatesGroup):
     print_dimensions = State()
     print_conditions = State()
     urgency = State()
-	comment = State()
+    comment = State()
     files = State()
 
     scan_object = State()
@@ -64,7 +64,7 @@ def get_step_value(text: str) -> str:
 
 async def start_branch(message: Message, state: FSMContext, branch: str, first_state: State, first_question: str):
     try:
-	database.cancel_old_filling_orders(message.from_user.id)
+        database.cancel_old_filling_orders(message.from_user.id)
         order_id = database.create_order(
             user_id=message.from_user.id,
             username=message.from_user.username,
@@ -75,8 +75,8 @@ async def start_branch(message: Message, state: FSMContext, branch: str, first_s
         logging.exception("Failed to create branch")
         await reply_db_error(message)
         return
-		
-		await state.clear()
+
+    await state.clear()
     await state.set_state(first_state)
     await state.update_data(order_id=order_id, branch=branch)
     await message.answer(first_question, reply_markup=SKIP_KEYBOARD)
@@ -90,7 +90,7 @@ async def update_field_and_ask_next(
     next_question: str,
 ):
     data = await state.get_data()
-	order_id = data.get("order_id")
+    order_id = data.get("order_id")
 
     try:
         database.update_order_field(order_id, field_name, get_step_value(message.text or ""))
@@ -99,14 +99,14 @@ async def update_field_and_ask_next(
         await reply_db_error(message)
         await state.clear()
         return
-		
-	await state.set_state(next_state)
+
+    await state.set_state(next_state)
     await message.answer(next_question, reply_markup=SKIP_KEYBOARD)
-	
-	
+
+
 async def finish_order(message: Message, state: FSMContext):
     data = await state.get_data()
-	order_id = data.get("order_id")
+    order_id = data.get("order_id")
 
     try:
         database.finalize_order(order_id)
@@ -123,7 +123,7 @@ async def finish_order(message: Message, state: FSMContext):
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     try:
-	config = database.get_bot_config()
+        config = database.get_bot_config()
         text = config.get(
             "welcome_menu_msg",
             "Добро пожаловать в Chel3D 👋\nВыберите нужный пункт меню:",
@@ -136,7 +136,7 @@ async def cmd_start(message: Message, state: FSMContext):
 
 async def about_handler(message: Message):
     try:
-	config = database.get_bot_config()
+        config = database.get_bot_config()
         text = config.get(
             "about_text",
             "Chel3D — 3D-печать, 3D-сканирование и помощь в создании модели.",
@@ -280,7 +280,7 @@ async def file_handler(message: Message, state: FSMContext):
         await message.answer("Отправьте документ/фото или нажмите ✅ Готово", reply_markup=FILES_KEYBOARD)
         return
 
-try:
+    try:
         database.add_order_file(order_id, file_id, file_name, mime, size)
     except Exception:
         logging.exception("Failed to save file")
