@@ -1,401 +1,354 @@
-# Author: Sergey Akulov
-# GitHub: https://github.com/serg-akulov
-
 import asyncio
 import logging
-import re
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ContentType
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
-import config
 import database
+from config import settings
 
-# Настройка логов
 logging.basicConfig(level=logging.INFO)
 
-# Инициализация
-bot = Bot(token=config.BOT_TOKEN)
-dp = Dispatcher()
+MENU_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📐 Рассчитать печать")],
+        [KeyboardButton(text="📡 3D-сканирование")],
+        [KeyboardButton(text="❓ Нет модели / Идея")],
+        [KeyboardButton(text="ℹ️ О нас")],
+    ],
+    resize_keyboard=True,
+)
+SKIP_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="➡️ Пропустить шаг")]],
+    resize_keyboard=True,
+)
+FILES_KEYBOARD = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="✅ Готово")], [KeyboardButton(text="➡️ Пропустить шаг")]],
+    resize_keyboard=True,
+)
 
-# --- Машина состояний ---
-class OrderForm(StatesGroup):
-    photo = State()
-    work_type = State()
-    dimensions = State()
-    conditions = State()
+
+class Form(StatesGroup):
+    print_type = State()
+    print_dimensions = State()
+    print_conditions = State()
     urgency = State()
-    extra_q = State()
-    comment = State()
+	comment = State()
+    files = State()
 
-# --- ПОМОЩНИКИ ---
-def get_text(key):
-    """
-    Берет текст ТОЛЬКО из базы.
-    Если ключа нет - вернет заглушку [NO_DB_TEXT: key], чтобы мы видели ошибку.
-    """
-    cfg = database.get_bot_config()
-    val = cfg.get(key)
-    if val: return val
-    return f"[NO_DB_TEXT: {key}]" # Если видишь это в боте - значит в базе нет этой строки
+    scan_object = State()
+    scan_dimensions = State()
+    scan_location = State()
+    scan_details = State()
 
-def get_config_bool(key):
-    cfg = database.get_bot_config()
-    return str(cfg.get(key, '0')) == '1'
+    idea_description = State()
+    idea_references = State()
+    idea_dimensions = State()
 
-def safe_text(message: types.Message):
-    if message.text: return message.text
-    if message.caption: return message.caption
-    if message.sticker: return "[Стикер]"
-    if message.photo: return "[Фото]"
-    return "[Неизвестно]"
 
-async def forward_message_to_admin(message: types.Message, order_id):
+SAFE_REPLY = "Сервис временно недоступен, попробуйте позже"
+
+
+async def reply_db_error(message: Message):
+    await message.answer(SAFE_REPLY, reply_markup=MENU_KEYBOARD)
+
+
+def get_step_value(text: str) -> str:
+    return "Другое" if text == "➡️ Пропустить шаг" else text
+
+
+async def start_branch(message: Message, state: FSMContext, branch: str, first_state: State, first_question: str):
     try:
-        cfg = database.get_bot_config()
-        admin_id = cfg.get("admin_chat_id", "0")
-        if admin_id and admin_id != '0':
-            header = f"📩 <b>Клиент (Заказ №{order_id}):</b>\n"
-            if message.text:
-                await bot.send_message(admin_id, header + message.text, parse_mode="HTML")
-            else:
-                await message.copy_to(admin_id)
-                await bot.send_message(admin_id, f"👆 К заказу №{order_id}", parse_mode="HTML")
-        else:
-            # Текст ошибки админа
-            await message.answer(get_text('err_admin_not_set'))
-    except Exception as e:
-        logging.error(f"Deliver error: {e}")
+	database.cancel_old_filling_orders(message.from_user.id)
+        order_id = database.create_order(
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            full_name=message.from_user.full_name,
+            branch=branch,
+        )
+    except Exception:
+        logging.exception("Failed to create branch")
+        await reply_db_error(message)
+        return
+		
+		await state.clear()
+    await state.set_state(first_state)
+    await state.update_data(order_id=order_id, branch=branch)
+    await message.answer(first_question, reply_markup=SKIP_KEYBOARD)
 
-# --- КЛАВИАТУРЫ ---
-def kb_photo_step():
-    buttons = [[KeyboardButton(text="✅ Все фото отправлены")]]
-    if not get_config_bool('is_photo_required'):
-        buttons.append([KeyboardButton(text=get_text('btn_skip_photo'))])
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True, one_time_keyboard=True)
 
-def kb_work_type():
-    buttons = [
-        [InlineKeyboardButton(text=get_text('btn_type_repair'), callback_data="type_repair")],
-        [InlineKeyboardButton(text=get_text('btn_type_copy'), callback_data="type_copy")],
-        [InlineKeyboardButton(text=get_text('btn_type_drawing'), callback_data="type_drawing")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-def kb_urgency():
-    buttons = [
-        [InlineKeyboardButton(text=get_text('btn_urgency_high'), callback_data="urgency_high")],
-        [InlineKeyboardButton(text=get_text('btn_urgency_med'), callback_data="urgency_med")],
-        [InlineKeyboardButton(text=get_text('btn_urgency_low'), callback_data="urgency_low")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-# --- ЛОГИКА ---
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message, state: FSMContext):
-    await state.clear()
-    
-    user_id = message.from_user.id
-    # Очищаем старые черновики
-    database.cancel_old_filling_orders(user_id)
-    
-    username = message.from_user.username or "NoNick"
-    full_name = message.from_user.full_name
-    order_id = database.create_order(user_id, username, full_name)
-    
-    await state.update_data(order_id=order_id, photo_ids=[])
-    
-    # СТРОГО ИЗ БАЗЫ
-    welcome = get_text('welcome_msg')
-    await message.answer(f"{welcome}\n\n🆕 <b>Заказ №{order_id}</b>", parse_mode="HTML")
-    
-    await message.answer(get_text('step_photo_text'), reply_markup=kb_photo_step(), parse_mode="Markdown")
-    await state.set_state(OrderForm.photo)
-
-@dp.message(Command("cancel"))
-async def cmd_cancel(message: types.Message, state: FSMContext):
-    await state.clear()
-    user_id = message.from_user.id
-    database.cancel_old_filling_orders(user_id)
-    await message.answer(get_text('msg_order_canceled'))
-
-# 1. ФОТО
-@dp.message(OrderForm.photo, F.photo | F.document)
-async def process_photo(message: types.Message, state: FSMContext):
+async def update_field_and_ask_next(
+    message: Message,
+    state: FSMContext,
+    field_name: str,
+    next_state: State,
+    next_question: str,
+):
     data = await state.get_data()
-    p_ids = data.get('photo_ids', [])
-    
-    if message.photo:
-        p_ids.append(f"p:{message.photo[-1].file_id}")
-    elif message.document and message.document.mime_type.startswith('image/'):
-        p_ids.append(f"d:{message.document.file_id}")
-    else:
-        await message.answer("⚠️ Пожалуйста, пришлите фото или изображение файлом.")
+	order_id = data.get("order_id")
+
+    try:
+        database.update_order_field(order_id, field_name, get_step_value(message.text or ""))
+    except Exception:
+        logging.exception("Failed to update order field")
+        await reply_db_error(message)
+        await state.clear()
+        return
+		
+	await state.set_state(next_state)
+    await message.answer(next_question, reply_markup=SKIP_KEYBOARD)
+	
+	
+async def finish_order(message: Message, state: FSMContext):
+    data = await state.get_data()
+	order_id = data.get("order_id")
+
+    try:
+        database.finalize_order(order_id)
+    except Exception:
+        logging.exception("Failed to finalize order")
+        await reply_db_error(message)
+        await state.clear()
         return
 
-    await state.update_data(photo_ids=p_ids)
-    await message.answer(f"📸 Фото {len(p_ids)} принято.", reply_markup=kb_photo_step())
-
-@dp.message(OrderForm.photo)
-async def process_photo_done(message: types.Message, state: FSMContext):
-    txt = safe_text(message)
-    data = await state.get_data()
-    p_ids = data.get('photo_ids', [])
-    skip_btn = get_text('btn_skip_photo')
-
-    # 1. Завершить фото
-    if txt == "✅ Все фото отправлены":
-        if not p_ids:
-            await message.answer("⚠️ Вы не загрузили ни одного фото.")
-            return
-        database.update_order_field(data['order_id'], 'photo_file_id', ",".join(p_ids))
-        await message.answer("👍 Фото приняты.", reply_markup=types.ReplyKeyboardRemove())
-        await ask_work_type(message, state)
-
-    # 2. Пропустить
-    elif txt == skip_btn:
-        if get_config_bool('is_photo_required'):
-             await message.answer(get_text('err_photo_required'))
-        else:
-            await message.answer("👍 Ок, без фото.", reply_markup=types.ReplyKeyboardRemove())
-            await ask_work_type(message, state)
-            
-    # 3. Левый текст или завис
-    else:
-        # Проверяем, есть ли обязаловка фото
-        if get_config_bool('is_photo_required') and not p_ids:
-            await message.answer(get_text('err_photo_required'))
-            return
-            
-        # Пробуем восстановить состояние
-        await check_lost_state(message, state)
-
-async def ask_work_type(message, state):
-    await message.answer(get_text('step_type_text'), reply_markup=kb_work_type(), parse_mode="Markdown")
-    await state.set_state(OrderForm.work_type)
-
-# 2. ТИП
-@dp.callback_query(OrderForm.work_type)
-async def process_work_type(callback: types.CallbackQuery, state: FSMContext):
-    map_types = {'type_repair': 'btn_type_repair', 'type_copy': 'btn_type_copy', 'type_drawing': 'btn_type_drawing'}
-    # Получаем ключ
-    key = map_types.get(callback.data)
-    # Получаем текст из базы
-    human = get_text(key)
-    
-    database.update_order_field((await state.get_data())['order_id'], 'work_type', human)
-    
-    await callback.message.edit_text(f"✅ {human}")
-    await callback.message.answer(get_text('step_dim_text'), parse_mode="Markdown")
-    await state.set_state(OrderForm.dimensions)
-
-# 3. РАЗМЕРЫ
-@dp.message(OrderForm.dimensions)
-async def process_dimensions(message: types.Message, state: FSMContext):
-    txt = safe_text(message)
-    database.update_order_field((await state.get_data())['order_id'], 'dimensions_info', txt)
-    
-    btns = [
-        [InlineKeyboardButton(text=get_text('btn_cond_rotation'), callback_data="cond_rotation")],
-        [InlineKeyboardButton(text=get_text('btn_cond_static'), callback_data="cond_static")],
-        [InlineKeyboardButton(text=get_text('btn_cond_impact'), callback_data="cond_impact")],
-        [InlineKeyboardButton(text=get_text('btn_cond_unknown'), callback_data="cond_unknown")]
-    ]
-    await message.answer(get_text('step_cond_text'), reply_markup=InlineKeyboardMarkup(inline_keyboard=btns), parse_mode="Markdown")
-    await state.set_state(OrderForm.conditions)
-
-# 4. УСЛОВИЯ
-@dp.callback_query(OrderForm.conditions)
-async def process_conditions(callback: types.CallbackQuery, state: FSMContext):
-    map_cond = {'cond_rotation': 'btn_cond_rotation', 'cond_static': 'btn_cond_static', 'cond_impact': 'btn_cond_impact', 'cond_unknown': 'btn_cond_unknown'}
-    human = get_text(map_cond.get(callback.data))
-    
-    database.update_order_field((await state.get_data())['order_id'], 'conditions', human)
-    
-    await callback.message.edit_text(f"✅ {human}")
-    await callback.message.answer(get_text('step_urgency_text'), reply_markup=kb_urgency(), parse_mode="Markdown")
-    await state.set_state(OrderForm.urgency)
-
-# 5. СРОЧНОСТЬ
-@dp.callback_query(OrderForm.urgency)
-async def process_urgency(callback: types.CallbackQuery, state: FSMContext):
-    map_urg = {'urgency_high': 'btn_urgency_high', 'urgency_med': 'btn_urgency_med', 'urgency_low': 'btn_urgency_low'}
-    human = get_text(map_urg.get(callback.data))
-    
-    database.update_order_field((await state.get_data())['order_id'], 'urgency', human)
-    await callback.message.edit_text(f"✅ {human}")
-    
-    if get_config_bool('step_extra_enabled'):
-        await callback.message.answer(get_text('step_extra_text'), parse_mode="Markdown")
-        await state.set_state(OrderForm.extra_q)
-    else:
-        await ask_final(callback.message, state)
-
-@dp.message(OrderForm.extra_q)
-async def process_extra(message: types.Message, state: FSMContext):
-    txt = safe_text(message)
-    await state.update_data(temp_comment=f"Доп: {txt}\n")
-    await ask_final(message, state)
-
-async def ask_final(message, state):
-    await message.answer(get_text('step_final_text'), parse_mode="Markdown")
-    await state.set_state(OrderForm.comment)
-
-# 6. ФИНАЛ
-@dp.message(OrderForm.comment)
-async def process_comment(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    comm = safe_text(message)
-    final_comm = data.get('temp_comment', '') + comm
-    await finalize_order(message, data['order_id'], final_comm)
     await state.clear()
+    await message.answer("Спасибо! Заявка отправлена менеджеру ✅", reply_markup=MENU_KEYBOARD)
 
-async def finalize_order(message, order_id, comment_text):
-    database.update_order_field(order_id, 'comment', comment_text)
-    database.finish_order_creation(order_id)
-    await message.answer(get_text('msg_done'), parse_mode="Markdown")
-    await notify_admin(order_id)
 
-async def notify_admin(order_id):
-    cfg = database.get_bot_config()
-    aid = cfg.get("admin_chat_id", "0")
-    if not aid or aid == '0': return 
-
-    order = database.get_order(order_id)
-    text = (f"🔔 <b>НОВЫЙ ЗАКАЗ №{order['id']}</b>\n"
-            f"👤: {order['full_name']} (@{order['username']})\n"
-            f"🛠: {order['work_type']}\n"
-            f"📏: {order['dimensions_info']}\n"
-            f"⚙️: {order['conditions']}\n"
-            f"⏳: {order['urgency']}\n"
-            f"📝: {order['comment']}\n\n"
-            f"<i>Reply для ответа.</i>")
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
     try:
-        raw_ids = order['photo_file_id'].split(',') if order['photo_file_id'] else []
-        media = []
-        for rid in raw_ids:
-            if rid.startswith('p:'):
-                media.append(types.InputMediaPhoto(media=rid[2:]))
-            elif rid.startswith('d:'):
-                media.append(types.InputMediaDocument(media=rid[2:]))
-            else:
-                # На случай старых записей без префикса
-                media.append(types.InputMediaPhoto(media=rid))
+	config = database.get_bot_config()
+        text = config.get(
+            "welcome_menu_msg",
+            "Добро пожаловать в Chel3D 👋\nВыберите нужный пункт меню:",
+        )
+    except Exception:
+        text = "Добро пожаловать в Chel3D 👋\nВыберите нужный пункт меню:"
 
-        if len(media) > 1:
-            await bot.send_media_group(aid, media=media)
-            await bot.send_message(aid, text, parse_mode="HTML")
-        elif len(media) == 1:
-            m = media[0]
-            if isinstance(m, types.InputMediaPhoto):
-                await bot.send_photo(aid, m.media, caption=text, parse_mode="HTML")
-            else:
-                await bot.send_document(aid, m.media, caption=text, parse_mode="HTML")
-        else:
-            await bot.send_message(aid, text, parse_mode="HTML")
-    except Exception as e:
-        logging.error(f"Err admin: {e}")
+    await message.answer(text, reply_markup=MENU_KEYBOARD)
 
-# --- АДМИНКА ---
-@dp.message(Command("iamadmin"))
-async def cmd_admin_auth(message: types.Message):
-    args = message.text.split()
-    if len(args) > 1 and args[1] == config.BOT_ADMIN_PASSWORD:
-        database.update_bot_config("admin_chat_id", str(message.chat.id))
-        await message.answer("✅ Админ авторизован.")
-    else:
-        await message.answer("❌ Неверный пароль.")
 
-@dp.message(F.reply_to_message)
-async def admin_reply_handler(message: types.Message):
+async def about_handler(message: Message):
     try:
-        cfg = database.get_bot_config()
-        aid = str(cfg.get("admin_chat_id", "0"))
-        if str(message.chat.id) != aid: return 
+	config = database.get_bot_config()
+        text = config.get(
+            "about_text",
+            "Chel3D — 3D-печать, 3D-сканирование и помощь в создании модели.",
+        )
+    except Exception:
+        text = "Chel3D — 3D-печать, 3D-сканирование и помощь в создании модели."
+    await message.answer(text, reply_markup=MENU_KEYBOARD)
 
-        orig = message.reply_to_message.caption or message.reply_to_message.text
-        if not orig:
-            await message.answer("⚠️ Нет текста для ответа.")
-            return
-        
-        match = re.search(r"(?:№|No|Num|Заказ)\s*[:#]?\s*(\d+)", orig, re.IGNORECASE)
-        if not match:
-            await message.answer(f"⚠️ Не вижу номер заказа.")
-            return
-            
-        oid = int(match.group(1))
-        order = database.get_order(oid)
-        if not order:
-            await message.answer(f"❌ Заказ №{oid} не найден.")
-            return
 
-        try:
-            if message.text:
-                await bot.send_message(order['user_id'], f"👨‍🔧 <b>Мастер:</b>\n{message.text}", parse_mode="HTML")
-            else:
-                await message.copy_to(order['user_id'])
-            await message.react([types.ReactionTypeEmoji(emoji="👍")])
-        except Exception as e:
-            await message.answer(f"❌ Ошибка отправки:\n{e}")
-    except Exception as e:
-        await message.answer(f"💀 Err: {e}")
+async def print_start(message: Message, state: FSMContext):
+    await start_branch(
+        message,
+        state,
+        branch="print_3d",
+        first_state=Form.print_type,
+        first_question="Тип работы (FDM / Фотополимер / Не знаю):",
+    )
 
-# --- УМНЫЙ ПЕРЕХВАТЧИК ---
-@dp.message()
-async def user_chat_handler(message: types.Message):
-    await check_lost_state(message, None)
 
-async def check_lost_state(message, state):
-    filling_id = database.get_active_order_id(message.from_user.id)
-    
-    if filling_id:
-        order = database.get_order(filling_id)
-        has_photos = order['photo_file_id'] is not None and len(str(order['photo_file_id'])) > 5
-        
-        if not has_photos:
-            # Если пришло фото - обрабатываем его
-            if message.photo or (message.document and message.document.mime_type.startswith('image/')):
-                if state: await state.set_state(OrderForm.photo)
-                # Передаем управление process_photo, она теперь умеет вешать префиксы
-                await process_photo(message, state or FSMContext(storage=dp.storage, key=types.StorageKey(bot.id, message.chat.id, message.from_user.id)))
-                return
+async def scan_start(message: Message, state: FSMContext):
+    await start_branch(
+        message,
+        state,
+        branch="scan_3d",
+        first_state=Form.scan_object,
+        first_question="Что нужно отсканировать?",
+    )
 
-            if get_config_bool('is_photo_required'):
-                await message.answer(get_text('err_photo_required'))
-                return
-            
-            if state: 
-                await state.update_data(order_id=filling_id)
-                await state.set_state(OrderForm.photo)
-            await process_photo_done(message, state or FSMContext(storage=dp.storage, key=types.StorageKey(bot.id, message.chat.id, message.from_user.id)))
-            return
 
-        if not order['work_type']:
-            await message.answer("⚠️ Восстанавливаю... Выберите ТИП:", reply_markup=kb_work_type())
-            if state: await state.set_state(OrderForm.work_type)
-            return
+async def idea_start(message: Message, state: FSMContext):
+    await start_branch(
+        message,
+        state,
+        branch="no_model_idea",
+        first_state=Form.idea_description,
+        first_question="Опишите вашу идею:",
+    )
 
-        if not order['dimensions_info']:
-            database.update_order_field(filling_id, 'dimensions_info', safe_text(message))
-            btns = [[InlineKeyboardButton(text=get_text('btn_cond_rotation'), callback_data="cond_rotation")], [InlineKeyboardButton(text=get_text('btn_cond_static'), callback_data="cond_static")], [InlineKeyboardButton(text=get_text('btn_cond_unknown'), callback_data="cond_unknown")]]
-            await message.answer(f"✅ Размеры записал ({safe_text(message)}). Условия?", reply_markup=InlineKeyboardMarkup(inline_keyboard=btns))
-            if state: await state.set_state(OrderForm.conditions)
-            return
 
-        await finalize_order(message, filling_id, safe_text(message))
+async def on_print_type(message: Message, state: FSMContext):
+    await update_field_and_ask_next(message, state, "step_type", Form.print_dimensions, "Размеры / габариты:")
+
+
+async def on_print_dimensions(message: Message, state: FSMContext):
+    await update_field_and_ask_next(
+        message,
+        state,
+        "step_dimensions",
+        Form.print_conditions,
+        "Условия (материал/цвет/прочность/назначение):",
+    )
+
+
+async def on_print_conditions(message: Message, state: FSMContext):
+    await update_field_and_ask_next(message, state, "step_conditions", Form.urgency, "Срочность:")
+
+
+async def on_scan_object(message: Message, state: FSMContext):
+    await update_field_and_ask_next(message, state, "scan_object", Form.scan_dimensions, "Размеры / габариты объекта:")
+
+
+async def on_scan_dimensions(message: Message, state: FSMContext):
+    await update_field_and_ask_next(message, state, "scan_dimensions", Form.scan_location, "Где находится объект?")
+
+
+async def on_scan_location(message: Message, state: FSMContext):
+    await update_field_and_ask_next(
+        message,
+        state,
+        "scan_location",
+        Form.scan_details,
+        "Нужна ли высокая детализация? Опишите требования:",
+    )
+
+
+async def on_scan_details(message: Message, state: FSMContext):
+    await update_field_and_ask_next(message, state, "scan_details", Form.urgency, "Срочность:")
+
+
+async def on_idea_description(message: Message, state: FSMContext):
+    await update_field_and_ask_next(
+        message,
+        state,
+        "idea_description",
+        Form.idea_references,
+        "Есть ли референсы? Опишите или вставьте ссылку:",
+    )
+
+
+async def on_idea_references(message: Message, state: FSMContext):
+    await update_field_and_ask_next(
+        message,
+        state,
+        "idea_references",
+        Form.idea_dimensions,
+        "Габариты / назначение изделия:",
+    )
+
+
+async def on_idea_dimensions(message: Message, state: FSMContext):
+    await update_field_and_ask_next(message, state, "idea_dimensions", Form.urgency, "Срочность:")
+
+
+async def on_urgency_common(message: Message, state: FSMContext):
+    await update_field_and_ask_next(message, state, "step_urgency", Form.comment, "Комментарий:")
+
+
+async def on_comment_common(message: Message, state: FSMContext):
+    await update_field_and_ask_next(
+        message,
+        state,
+        "step_comment",
+        Form.files,
+        "Прикрепите файлы (документы/фото). Нажмите ✅ Готово для завершения.",
+    )
+    await message.answer("Можно отправить несколько файлов.", reply_markup=FILES_KEYBOARD)
+
+
+async def file_handler(message: Message, state: FSMContext):
+    data = await state.get_data()
+    order_id = data.get("order_id")
+
+    file_id = None
+    file_name = "file"
+    mime = None
+    size = None
+
+    if message.document:
+        file_id = message.document.file_id
+        file_name = message.document.file_name or "document"
+        mime = message.document.mime_type
+        size = message.document.file_size
+    elif message.photo:
+        photo = message.photo[-1]
+        file_id = photo.file_id
+        file_name = f"photo_{photo.file_unique_id}.jpg"
+        size = photo.file_size
+        mime = "image/jpeg"
+
+    if not file_id:
+        await message.answer("Отправьте документ/фото или нажмите ✅ Готово", reply_markup=FILES_KEYBOARD)
         return
 
-    order_id = database.get_user_last_active_order(message.from_user.id)
-    if order_id:
-        await forward_message_to_admin(message, order_id)
-    else:
-        await message.answer(get_text('err_no_active_order'))
+try:
+        database.add_order_file(order_id, file_id, file_name, mime, size)
+    except Exception:
+        logging.exception("Failed to save file")
+        await reply_db_error(message)
+        await state.clear()
+        return
+
+    await message.answer("Файл сохранён. Можете отправить ещё или нажать ✅ Готово", reply_markup=FILES_KEYBOARD)
+
+
+async def files_done(message: Message, state: FSMContext):
+    await finish_order(message, state)
+
+
+async def fallback_handler(message: Message, state: FSMContext):
+    if await state.get_state() is None:
+        await message.answer("Выберите пункт меню, чтобы оформить заявку 🙂", reply_markup=MENU_KEYBOARD)
+        return
+
+    await message.answer("Пожалуйста, ответьте на вопрос шага или нажмите ➡️ Пропустить шаг")
+
+
+async def on_startup():
+    database.init_db_if_needed()
+
+
+def register_handlers(dp: Dispatcher):
+    dp.message.register(cmd_start, CommandStart())
+    dp.message.register(about_handler, F.text == "ℹ️ О нас")
+
+    dp.message.register(print_start, F.text == "📐 Рассчитать печать")
+    dp.message.register(scan_start, F.text == "📡 3D-сканирование")
+    dp.message.register(idea_start, F.text == "❓ Нет модели / Идея")
+
+    dp.message.register(on_print_type, Form.print_type)
+    dp.message.register(on_print_dimensions, Form.print_dimensions)
+    dp.message.register(on_print_conditions, Form.print_conditions)
+
+    dp.message.register(on_scan_object, Form.scan_object)
+    dp.message.register(on_scan_dimensions, Form.scan_dimensions)
+    dp.message.register(on_scan_location, Form.scan_location)
+    dp.message.register(on_scan_details, Form.scan_details)
+
+    dp.message.register(on_idea_description, Form.idea_description)
+    dp.message.register(on_idea_references, Form.idea_references)
+    dp.message.register(on_idea_dimensions, Form.idea_dimensions)
+
+    dp.message.register(on_urgency_common, Form.urgency)
+    dp.message.register(on_comment_common, Form.comment)
+
+    dp.message.register(file_handler, Form.files, F.content_type.in_({ContentType.DOCUMENT, ContentType.PHOTO}))
+    dp.message.register(files_done, Form.files, F.text.in_({"✅ Готово", "➡️ Пропустить шаг"}))
+
+    dp.message.register(fallback_handler)
+
 
 async def main():
+    if not settings.bot_token:
+        raise RuntimeError("BOT_TOKEN is empty")
+
+    await on_startup()
+
+    bot = Bot(token=settings.bot_token)
+    dp = Dispatcher(storage=MemoryStorage())
+    register_handlers(dp)
+
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
