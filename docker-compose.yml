@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   mysql:
     image: mysql:8.0
@@ -6,7 +8,7 @@ services:
     env_file:
       - .env
     environment:
-	  MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DB}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
@@ -14,7 +16,7 @@ services:
       - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-	  - ./init/1_schema.sql:/docker-entrypoint-initdb.d/1_schema.sql:ro
+      - ./init/1_schema.sql:/docker-entrypoint-initdb.d/1_schema.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
       interval: 5s
@@ -33,7 +35,7 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-		
+
   backend:
     build:
       context: .
