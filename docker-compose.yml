@@ -1,12 +1,12 @@
 services:
   mysql:
-      image: mysql:8.0
+    image: mysql:8.0
     container_name: chel3d_mysql
     restart: unless-stopped
     env_file:
       - .env
     environment:
-	MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+	  MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DB}
       MYSQL_USER: ${MYSQL_USER}
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
@@ -14,7 +14,7 @@ services:
       - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-	        - ./init/1_schema.sql:/docker-entrypoint-initdb.d/1_schema.sql:ro
+	  - ./init/1_schema.sql:/docker-entrypoint-initdb.d/1_schema.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
       interval: 5s
@@ -34,6 +34,31 @@ services:
       mysql:
         condition: service_healthy
 		
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: chel3d_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "45556:45556"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+    container_name: chel3d_frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
   admin:
     build:
       context: .
