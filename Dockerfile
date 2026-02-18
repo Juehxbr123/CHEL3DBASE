@@ -2,17 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+COPY backend/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends netcat-openbsd \
-    && rm -rf /var/lib/apt/lists/*
+COPY backend /app/backend
+COPY database.py config.py /app/
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+EXPOSE 45556
 
-COPY . .
-RUN chmod +x /app/docker-entrypoint.sh
-
-CMD ["/app/docker-entrypoint.sh"]
+CMD ["python", "backend/main.py"]
