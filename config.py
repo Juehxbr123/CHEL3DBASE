@@ -14,6 +14,8 @@ class Settings:
     mysql_db: str = os.getenv("MYSQL_DB", "chel3d_db")
     mysql_user: str = os.getenv("MYSQL_USER", "chel3d_user")
     mysql_password: str = os.getenv("MYSQL_PASSWORD", "")
+    orders_chat_id: str = os.getenv("ORDERS_CHAT_ID", "")
+    manager_username: str = os.getenv("MANAGER_USERNAME", "")
 
 
 settings = Settings()
